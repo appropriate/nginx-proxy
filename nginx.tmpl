@@ -138,6 +138,10 @@ server {
 			{{ $suffix := printf "-%s" $sum }}
 			location {{ $path }} {
 				proxy_pass http://{{ $host }}{{ $suffix }};
+				{{ if (exists (printf "/etc/nginx/htpasswd/%s" $host)) }}
+				auth_basic	"Restricted {{ $host }}";
+				auth_basic_user_file	{{ (printf "/etc/nginx/htpasswd/%s" $host) }};
+				{{ end }}
 			}
 		{{ end }}
 	{{ end }}
@@ -165,6 +169,10 @@ server {
 			{{ $suffix := printf "-%s" $sum }}
 			location {{ $path }} {
 				proxy_pass http://{{ $host }}{{ $suffix }};
+				{{ if (exists (printf "/etc/nginx/htpasswd/%s" $host)) }}
+				auth_basic	"Restricted {{ $host }}";
+				auth_basic_user_file	{{ (printf "/etc/nginx/htpasswd/%s" $host) }};
+				{{ end }}
 			}
 		{{ end }}
 	{{ end }}
