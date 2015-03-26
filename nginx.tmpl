@@ -168,7 +168,7 @@ server {
 			{{ $sum := sha1 $path }}
 			{{ $suffix := printf "-%s" $sum }}
 			location {{ $path }} {
-				proxy_pass http://{{ $host }}{{ $suffix }};
+				proxy_pass http://{{ $host }}{{ $suffix }}/;
 				{{ if (exists (printf "/etc/nginx/htpasswd/%s" $host)) }}
 				auth_basic	"Restricted {{ $host }}";
 				auth_basic_user_file	{{ (printf "/etc/nginx/htpasswd/%s" $host) }};
