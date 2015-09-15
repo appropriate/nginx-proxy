@@ -8,7 +8,12 @@ function setup {
 }
 
 function teardown {
-	docker ps -aq | xargs -r docker rm -fv &>/dev/null
+	docker ps -aq | tee docker-ps.out | xargs -r docker rm -fv >&2 || {
+		set -x
+		cat docker-ps.out
+		docker ps -a
+		false
+	} >&2
 }
 
 
