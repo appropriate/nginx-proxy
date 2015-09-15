@@ -9,13 +9,18 @@ function setup {
 
 function teardown {
 	docker ps -aq | tee docker-ps.out | xargs -r docker rm -fv >&2 || {
-		set -x
-		cat docker-ps.out
-		docker info
-		mount
-		sudo cat /var/log/upstart/docker.log
-		docker ps -a
-		false
+		if [ "$status" = 1 ]; then
+			(
+				set -x
+				cat docker-ps.out
+				docker info
+				mount
+				sudo ausearch --comm docker
+				sudo cat /var/log/upstart/docker.log
+				docker ps -a
+				false
+			)
+		fi
 	} >&2
 }
 
