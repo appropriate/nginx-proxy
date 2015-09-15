@@ -11,7 +11,7 @@ before_install:
   - docker pull jwilder/docker-gen
 
 before_script:
-  - echo 'DOCKER_OPTS+=" --debug=true" | sudo tee /etc/default/docker'
+  - echo 'DOCKER_OPTS+=" --debug=true --log-level=debug" | sudo tee /etc/default/docker'
   - sudo restart docker
 
 script:
