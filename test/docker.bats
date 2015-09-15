@@ -12,6 +12,7 @@ function teardown {
 		set -x
 		cat docker-ps.out
 		docker info
+		mount
 		sudo cat /var/log/upstart/docker.log
 		docker ps -a
 		false
