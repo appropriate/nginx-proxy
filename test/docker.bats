@@ -11,6 +11,7 @@ function teardown {
 	docker ps -aq | tee docker-ps.out | xargs -r docker rm -fv >&2 || {
 		set -x
 		cat docker-ps.out
+		cat /var/log/docker.log
 		docker ps -a
 		false
 	} >&2
