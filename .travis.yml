@@ -10,6 +10,10 @@ before_install:
   - docker pull python:3
   - docker pull jwilder/docker-gen
 
+before_script:
+  - echo 'DOCKER_OPTS+=" --debug=true" | sudo tee /etc/default/docker'
+  - sudo restart docker
+
 script:
   - docker build -t jwilder/nginx-proxy:bats .
   - bats test
