@@ -112,7 +112,7 @@ server {
 {{ if $hasDefaultPath }}
 {{ template "upstream-block" dict "Host" $host "Suffix" "" "Containers" $containers }}
 {{ else }}
-{{ $path := printf "/%s" (index $hostParts 1) }}
+{{ $path := printf "%s" (index $hostParts 1) }}
 {{ template "upstream-block" dict "Host" $host "Suffix" (printf "-%s" (sha1 $path)) "Containers" $containers }}
 {{ end }}
 
