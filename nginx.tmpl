@@ -174,7 +174,7 @@ server {
 	{{ if $hasDefaultPath }}
 	{{ template "location" (dict "Path" "/" "Proto" $proto "Host" $host "Suffix" "" ) }}
 	{{ else }}
-	{{ $path := printf "/%s" (index $hostParts 1) }}
+	{{ $path := printf "%s" (index $hostParts 1) }}
 	{{ template "location" (dict "Path" $path "Proto" $proto "Host" $host "Suffix" (printf "-%s" (sha1 $path)) ) }}
 	{{ end }}
 }
