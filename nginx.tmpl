@@ -1,53 +1,3 @@
-{{ define "upstream-block" }}
-upstream {{ .Host }}{{ .Suffix }} {
-{{ range $container := .Containers }}
-	{{ $addrLen := len $container.Addresses }}
-	{{/* If only 1 port exposed, use that */}}
-	{{ if eq $addrLen 1 }}
-		{{ $address := index $container.Addresses 0 }}
-		{{ template "upstream" (dict "Container" $container "Address" $address) }}
-	{{/* If more than one port exposed, use the one matching VIRTUAL_PORT env var, falling back to standard web port 80 */}}
-	{{ else }}
-		{{ $port := coalesce $container.Env.VIRTUAL_PORT "80" }}
-		{{ $address := where $container.Addresses "Port" $port | first }}
-		{{ template "upstream" (dict "Container" $container "Address" $address) }}
-	{{ end }}
-{{ end }}
-}
-{{ end }}
-
-{{ define "upstream" }}
-	{{ if .Address }}
-		{{/* If we got the containers from swarm and this container's port is published to host, use host IP:PORT */}}
-		{{ if and .Container.Node.ID .Address.HostPort }}
-			# {{ .Container.Node.Name }}/{{ .Container.Name }}
-			server {{ .Container.Node.Address.IP }}:{{ .Address.HostPort }};
-		{{/* If there is no swarm node or the port is not published on host, use container's IP:PORT */}}
-		{{ else }}
-			# {{ .Container.Name }}
-			server {{ .Address.IP }}:{{ .Address.Port }};
-		{{ end }}
-	{{ else }}
-		# {{ .Container.Name }}
-		server {{ .Container.IP }} down;
-	{{ end }}
-{{ end }}
-
-{{ define "location" }}
-	location {{ .Path }} {
-		proxy_pass {{ .Proto }}://{{ .Host }}{{ .Suffix }};
-		{{ if (exists (printf "/etc/nginx/htpasswd/%s" .Host)) }}
-		auth_basic	"Restricted {{ .Host }}";
-		auth_basic_user_file	{{ (printf "/etc/nginx/htpasswd/%s" .Host) }};
-		{{ end }}
-		{{ if (exists (printf "/etc/nginx/vhost.d/%s_location" .Host)) }}
-		include {{ printf "/etc/nginx/vhost.d/%s_location" .Host }};
-		{{ else if (exists "/etc/nginx/vhost.d/default_location") }}
-		include /etc/nginx/vhost.d/default_location;
-		{{ end }}
-	}
-{{ end }}
-
 # If we receive X-Forwarded-Proto, pass it through; otherwise, pass along the
 # scheme used to connect to this server
 map $http_x_forwarded_proto $proxy_x_forwarded_proto {
@@ -59,7 +9,7 @@ map $http_x_forwarded_proto $proxy_x_forwarded_proto {
 # Connection header that may have been passed to this server
 map $http_upgrade $proxy_connection {
   default upgrade;
-  '' close;
+  ''      '';
 }
 
 gzip_types text/plain text/css application/javascript application/json application/x-javascript text/xml application/xml application/xml+rss text/javascript;
@@ -68,11 +18,9 @@ log_format vhost '$host $remote_addr - $remote_user [$time_local] '
                  '"$request" $status $body_bytes_sent '
                  '"$http_referer" "$http_user_agent"';
 
-access_log off;
+access_log /proc/self/fd/1 vhost;
+error_log /proc/self/fd/2;
 
-{{ if (exists "/etc/nginx/proxy.conf") }}
-include /etc/nginx/proxy.conf;
-{{ else }}
 # HTTP 1.1 support
 proxy_http_version 1.1;
 proxy_buffering off;
@@ -82,45 +30,59 @@ proxy_set_header Connection $proxy_connection;
 proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 proxy_set_header X-Forwarded-Proto $proxy_x_forwarded_proto;
-{{ end }}
 
 server {
-	server_name _; # This is just an invalid value which will never trigger on a real hostname.
-	listen 80;
-	access_log /var/log/nginx/access.log vhost;
-	return 503;
+        listen 80 default_server;
+        server_name _; # This is just an invalid value which will never trigger on a real hostname.
+        return 503;
 }
 
-{{ if (and (exists "/etc/nginx/certs/default.crt") (exists "/etc/nginx/certs/default.key")) }}
-server {
-	server_name _; # This is just an invalid value which will never trigger on a real hostname.
-	listen 443 ssl http2;
-	access_log /var/log/nginx/access.log vhost;
-	return 503;
-
-	ssl_certificate /etc/nginx/certs/default.crt;
-	ssl_certificate_key /etc/nginx/certs/default.key;
+{{ define "upstream" }}
+upstream {{ .Host }}{{ .Suffix }} {
+{{ range $container := .Containers }}
+        {{ $addrLen := len $container.Addresses }}
+        {{/* If only 1 port exposed, use that */}}
+        {{ if eq $addrLen 1 }}
+                {{ with $address := index $container.Addresses 0 }}
+                   # {{$container.Name}}
+                   server {{ $address.IP }}:{{ $address.Port }};
+                {{ end }}
+        {{/* If more than one port exposed, use the one matching VIRTUAL_PORT env var */}}
+        {{ else if $container.Env.VIRTUAL_PORT }}
+                {{ range $address := .Addresses }}
+                   {{ if eq $address.Port $container.Env.VIRTUAL_PORT }}
+                   # {{$container.Name}}
+                   server {{ $address.IP }}:{{ $address.Port }};
+                   {{ end }}
+                {{ end }}
+        {{/* Else default to standard web port 80 */}}
+        {{ else }}
+                {{ range $address := $container.Addresses }}
+                        {{ if eq $address.Port "80" }}
+                        # {{$container.Name}}
+                        server {{ $address.IP }}:{{ $address.Port }};
+                        {{ end }}
+                {{ end }}
+        {{ end }}
+{{ end }}
 }
 {{ end }}
 
 {{ range $host, $containers := groupByMulti $ "Env.VIRTUAL_HOST" "," }}
-
-{{ $hostParts := splitN (trim $host) "/" 2 }}
-{{ $host := index $hostParts 0 }}
-{{ $hasDefaultPath := eq (len $hostParts) 1 }}
-
-{{ if $hasDefaultPath }}
-{{ template "upstream-block" dict "Host" $host "Suffix" "" "Containers" $containers }}
+{{ $paths := groupBy $containers "Env.VIRTUAL_PATH" }}
+{{ $pathCount := len $paths }}
+{{ if eq $pathCount 0 }}
+        {{ template "upstream" dict "Host" $host "Suffix" "" "Containers" $containers }}
 {{ else }}
-{{ $path := printf "%s" (index $hostParts 1) }}
-{{ template "upstream-block" dict "Host" $host "Suffix" (printf "-%s" (sha1 $path)) "Containers" $containers }}
+        {{ range $path, $containers := $paths }}
+                {{ $sum := sha1 $path }}
+                {{ $suffix := printf "-%s" $sum }}
+                {{ template "upstream" dict "Host" $host "Suffix" $suffix "Containers" $containers }}
+        {{ end }}
 {{ end }}
 
-{{ $default_host := or ($.Env.DEFAULT_HOST) "" }}
-{{ $default_server := index (dict $host "" $default_host "default_server") $host }}
-
 {{/* Get the VIRTUAL_PROTO defined by containers w/ the same vhost, falling back to "http" */}}
-{{ $proto := trim (or (first (groupByKeys $containers "Env.VIRTUAL_PROTO")) "http") }}
+{{ $proto := or (first (groupByKeys $containers "Env.VIRTUAL_PROTO")) "http" }}
 
 {{/* Get the first cert name defined by containers w/ the same vhost */}}
 {{ $certName := (first (groupByKeys $containers "Env.CERT_NAME")) }}
@@ -138,76 +100,92 @@ server {
 {{ if (and (ne $cert "") (exists (printf "/etc/nginx/certs/%s.crt" $cert)) (exists (printf "/etc/nginx/certs/%s.key" $cert))) }}
 
 server {
-	server_name {{ $host }};
-	listen 80 {{ $default_server }};
-	access_log /var/log/nginx/access.log vhost;
-	return 301 https://$host$request_uri;
+        server_name {{ $host }};
+        return 301 https://$host$request_uri;
 }
 
 server {
-	server_name {{ $host }};
-	listen 443 ssl http2 {{ $default_server }};
-	access_log /var/log/nginx/access.log vhost;
+        server_name {{ $host }};
+        listen 443 ssl;
 
-	ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
-	ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-DSS-AES128-GCM-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA:DHE-DSS-AES128-SHA256:DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:DHE-RSA-AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:AES256-SHA:AES:CAMELLIA:DES-CBC3-SHA:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!aECDH:!EDH-DSS-DES-CBC3-SHA:!EDH-RSA-DES-CBC3-SHA:!KRB5-DES-CBC3-SHA;
+        ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+        ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-DSS-AES128-GCM-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA:DHE-DSS-AES128-SHA256:DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:DHE-RSA-AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:AES256-SHA:AES:CAMELLIA:DES-CBC3-SHA:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!aECDH:!EDH-DSS-DES-CBC3-SHA:!EDH-RSA-DES-CBC3-SHA:!KRB5-DES-CBC3-SHA;
 
-	ssl_prefer_server_ciphers on;
-	ssl_session_timeout 5m;
-	ssl_session_cache shared:SSL:50m;
+        ssl_prefer_server_ciphers on;
+        ssl_session_timeout 5m;
+        ssl_session_cache shared:SSL:50m;
 
-	ssl_certificate /etc/nginx/certs/{{ (printf "%s.crt" $cert) }};
-	ssl_certificate_key /etc/nginx/certs/{{ (printf "%s.key" $cert) }};
+        ssl_certificate /etc/nginx/certs/{{ (printf "%s.crt" $cert) }};
+        ssl_certificate_key /etc/nginx/certs/{{ (printf "%s.key" $cert) }};
 
-	{{ if (exists (printf "/etc/nginx/certs/%s.dhparam.pem" $cert)) }}
-	ssl_dhparam {{ printf "/etc/nginx/certs/%s.dhparam.pem" $cert }};
-	{{ end }}
+        add_header Strict-Transport-Security "max-age=31536000";
 
-	add_header Strict-Transport-Security "max-age=31536000";
+        {{ if (exists (printf "/etc/nginx/vhost.d/%s" $host)) }}
+        include {{ printf "/etc/nginx/vhost.d/%s" $host }};
+        {{ end }}
 
-	{{ if (exists (printf "/etc/nginx/vhost.d/%s" $host)) }}
-	include {{ printf "/etc/nginx/vhost.d/%s" $host }};
-	{{ else if (exists "/etc/nginx/vhost.d/default") }}
-	include /etc/nginx/vhost.d/default;
-	{{ end }}
-
-	{{ if $hasDefaultPath }}
-	{{ template "location" (dict "Path" "/" "Proto" $proto "Host" $host "Suffix" "" ) }}
-	{{ else }}
-	{{ $path := printf "%s" (index $hostParts 1) }}
-	{{ template "location" (dict "Path" $path "Proto" $proto "Host" $host "Suffix" (printf "-%s" (sha1 $path)) ) }}
-	{{ end }}
+        {{ if eq $pathCount 0 }}
+        location / {
+                proxy_pass {{ $proto }}://{{ $host }};
+                {{ if (exists (printf "/etc/nginx/htpasswd/%s" $host)) }}
+                auth_basic      "Restricted {{ $host }}";
+                auth_basic_user_file    {{ (printf "/etc/nginx/htpasswd/%s" $host) }};
+                {{ end }}
+        }
+        {{ else }}
+                {{ range $path, $containers := $paths }}
+                        {{ $sum := sha1 $path }}
+                        {{ $suffix := printf "-%s" $sum }}
+                        location {{ $path }} {
+                                proxy_pass http://{{ $host }}{{ $suffix }};
+                                {{ if (exists (printf "/etc/nginx/htpasswd/%s" $host)) }}
+                                auth_basic      "Restricted {{ $host }}";
+                                auth_basic_user_file    {{ (printf "/etc/nginx/htpasswd/%s" $host) }};
+                                {{ end }}
+                        }
+                {{ end }}
+        {{ end }}
 }
 {{ else }}
 
 server {
-	server_name {{ $host }};
-	listen 80 {{ $default_server }};
-	access_log /var/log/nginx/access.log vhost;
+        server_name {{ $host }};
 
-	{{ if (exists (printf "/etc/nginx/vhost.d/%s" $host)) }}
-	include {{ printf "/etc/nginx/vhost.d/%s" $host }};
-	{{ else if (exists "/etc/nginx/vhost.d/default") }}
-	include /etc/nginx/vhost.d/default;
-	{{ end }}
+        {{ if (exists (printf "/etc/nginx/vhost.d/%s" $host)) }}
+        include {{ printf "/etc/nginx/vhost.d/%s" $host }};
+        {{ end }}
 
-	{{ if $hasDefaultPath }}
-	{{ template "location" (dict "Path" "/" "Proto" $proto "Host" $host "Suffix" "" ) }}
-	{{ else }}
-	{{ $path := printf "%s" (index $hostParts 1) }}
-	{{ template "location" (dict "Path" $path "Proto" $proto "Host" $host "Suffix" (printf "-%s" (sha1 $path)) ) }}
-	{{ end }}
+        {{ if eq $pathCount 0 }}
+        location / {
+                proxy_pass {{ $proto }}://{{ $host }};
+                {{ if (exists (printf "/etc/nginx/htpasswd/%s" $host)) }}
+                auth_basic      "Restricted {{ $host }}";
+                auth_basic_user_file    {{ (printf "/etc/nginx/htpasswd/%s" $host) }};
+                {{ end }}
+        }
+        {{ else }}
+                {{ range $path, $containers := $paths }}
+                        {{ $sum := sha1 $path }}
+                        {{ $suffix := printf "-%s" $sum }}
+                        location {{ $path }} {
+                                proxy_pass http://{{ $host }}{{ $suffix }};
+                                {{ if (exists (printf "/etc/nginx/htpasswd/%s" $host)) }}
+                                auth_basic      "Restricted {{ $host }}";
+                                auth_basic_user_file    {{ (printf "/etc/nginx/htpasswd/%s" $host) }};
+                                {{ end }}
+                        }
+                {{ end }}
+        {{ end }}
 }
 
 {{ if (and (exists "/etc/nginx/certs/default.crt") (exists "/etc/nginx/certs/default.key")) }}
 server {
-	server_name {{ $host }};
-	listen 443 ssl http2 {{ $default_server }};
-	access_log /var/log/nginx/access.log vhost;
-	return 503;
+        server_name {{ $host }};
+        listen 443 ssl;
+        return 503;
 
-	ssl_certificate /etc/nginx/certs/default.crt;
-	ssl_certificate_key /etc/nginx/certs/default.key;
+        ssl_certificate /etc/nginx/certs/default.crt;
+        ssl_certificate_key /etc/nginx/certs/default.key;
 }
 {{ end }}
 
